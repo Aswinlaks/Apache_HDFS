@@ -1,0 +1,126 @@
+// =============================================================================
+// dfs.proto — Protocol Buffer definitions for the Distributed File System
+// Defines three gRPC services: MetadataService, DataNodeService, RaftService
+// =============================================================================
+
+syntax = "proto3";
+
+package dfs;
+
+option go_package = "dfs-project/proto/dfs";
+
+// ======================== Metadata Service Messages ========================
+
+// File data sent by client for upload
+message FileData {
+  string filename = 1;
+  bytes content = 2;
+}
+
+// Response after file upload
+message UploadResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// Request to download or query a file
+message FileRequest {
+  string filename = 1;
+}
+
+// Location info for a single chunk (which DataNodes hold it)
+message ChunkLocation {
+  string chunk_id = 1;
+  repeated string datanode_addresses = 2; // DataNodes storing replicas
+}
+
+// List of chunk locations returned for download
+message FileChunks {
+  repeated ChunkLocation chunks = 1;
+}
+
+// Empty message for RPCs with no input
+message Empty {}
+
+// List of filenames
+message FileList {
+  repeated string filenames = 1;
+}
+
+// ======================== DataNode Service Messages ========================
+
+// A chunk of file data
+message Chunk {
+  string chunk_id = 1;
+  bytes data = 2;
+}
+
+// Acknowledgment from DataNode
+message Ack {
+  bool success = 1;
+  string message = 2;
+}
+
+// Request to retrieve a specific chunk
+message ChunkRequest {
+  string chunk_id = 1;
+}
+
+// ======================== RAFT Consensus Messages ========================
+
+// Candidate requests a vote during leader election
+message VoteRequest {
+  int32 term = 1;
+  string candidate_id = 2;
+  int32 last_log_index = 3;
+  int32 last_log_term = 4;
+}
+
+// Response to a vote request
+message VoteReply {
+  int32 term = 1;
+  bool vote_granted = 2;
+}
+
+// A single entry in the replicated log
+message LogEntry {
+  int32 term = 1;
+  string command = 2;
+}
+
+// Leader sends this for heartbeats and log replication
+message AppendRequest {
+  int32 term = 1;
+  string leader_id = 2;
+  int32 prev_log_index = 3;
+  int32 prev_log_term = 4;
+  repeated LogEntry entries = 5;
+  int32 leader_commit = 6;
+}
+
+// Response to AppendEntries
+message AppendReply {
+  int32 term = 1;
+  bool success = 2;
+}
+
+// ======================== Service Definitions ========================
+
+// MetadataService — Client talks to the Leader via this service
+service MetadataService {
+  rpc UploadFile(FileData) returns (UploadResponse);
+  rpc DownloadFile(FileRequest) returns (FileChunks);
+  rpc ListFiles(Empty) returns (FileList);
+}
+
+// DataNodeService — Leader/Client talks to DataNodes via this service
+service DataNodeService {
+  rpc StoreChunk(Chunk) returns (Ack);
+  rpc GetChunk(ChunkRequest) returns (Chunk);
+}
+
+// RaftService — RAFT nodes communicate via this service
+service RaftService {
+  rpc RequestVote(VoteRequest) returns (VoteReply);
+  rpc AppendEntries(AppendRequest) returns (AppendReply);
+}

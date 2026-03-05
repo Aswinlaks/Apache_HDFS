@@ -1,0 +1,28 @@
+# Compiled binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go test files
+*.test
+
+# Output files
+*.out
+
+# Storage directories (created at runtime by DataNodes)
+storage_*/
+
+# Downloaded files (created by client)
+downloaded_*
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
