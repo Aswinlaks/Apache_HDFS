@@ -1,0 +1,227 @@
+Distributed Systems
+Case Study
+Simplified Distributed File System Inspired by Apache HDFS
+
+Team:
+• Aswin Laks - [Your Roll Number]
+• [Team Member 2] - [Roll Number]
+• [Team Member 3] - [Roll Number]
+• [Team Member 4] - [Roll Number]
+
+────────────────────────────────────────────────────────────────
+
+1. Problem Statement & Relevance to Distributed Systems
+
+1.1 The Problem
+
+Large-scale data storage systems face fundamental challenges when files grow beyond the capacity of a single machine. A monolithic file server creates a single point of failure: if the server crashes, all data becomes inaccessible. Furthermore, as file sizes grow into gigabytes and terabytes, a single disk cannot provide the throughput needed for concurrent reads and writes. When multiple users need to access the same files stored across multiple machines, the system must know exactly where each piece of data resides and ensure that data remains available even when individual storage nodes fail unexpectedly.
+
+1.2 Relevance to Distributed Systems
+
+To solve these challenges, we engineered a Simplified Distributed File System inspired by Apache HDFS (Hadoop Distributed File System). This system moves away from a single monolithic storage server and implements a multi-node, replicated storage architecture. It specifically addresses core distributed systems concepts:
+
+• Fault Tolerance: Each file chunk is replicated to 2 DataNodes, so data survives individual node failures.
+• Consensus: The RAFT algorithm ensures all metadata server replicas agree on the global file-to-chunk mapping.
+• Data Partitioning: Large files are split into fixed-size chunks and distributed across multiple storage nodes.
+• Decentralized Data Transfer: Clients fetch data directly from DataNodes, avoiding the Leader as a bottleneck.
+
+────────────────────────────────────────────────────────────────
+
+2. System Architecture
+
+Our architecture separates metadata management from data storage, following the proven NameNode/DataNode pattern of Apache HDFS. It consists of four primary entities:
+
+1. Client: A CLI-based tool that allows users to upload, download, and list files.
+2. Leader (Metadata Server): The central coordinator that maintains the file-to-chunk mapping, splits files into chunks, and assigns chunks to DataNodes.
+3. DataNodes: Independent storage servers that store and serve file chunks on local disk.
+4. RAFT Consensus Module: Embedded within the Leader for leader election, heartbeat, and metadata log replication.
+
+Architecture Diagram:
+
+┌──────────────────────────────────────────────────────────┐
+│                    CLIENT (Laptop 4)                      │
+│              upload / download / list                     │
+└────────────────────┬─────────────────────────────────────┘
+                     │ gRPC (MetadataService)
+                     ▼
+┌──────────────────────────────────────────────────────────┐
+│           LEADER / METADATA SERVER (Laptop 1)             │
+│                                                           │
+│  ┌────────────┐  ┌────────────┐  ┌─────────────────────┐ │
+│  │  Metadata   │  │  File      │  │  RAFT Consensus     │ │
+│  │  Map        │  │  Chunking  │  │  Module             │ │
+│  │  file→      │  │  1MB       │  │  Leader Election    │ │
+│  │  chunks     │  │  chunks    │  │  Log Replication    │ │
+│  └────────────┘  └────────────┘  └─────────────────────┘ │
+└──────────┬─────────────────────────────────┬─────────────┘
+           │ gRPC (DataNodeService)          │
+           ▼                                 ▼
+   ┌──────────────┐                 ┌──────────────┐
+   │  DataNode 1  │                 │  DataNode 2  │
+   │  (Laptop 2)  │                 │  (Laptop 3)  │
+   │  Port 50052  │                 │  Port 50053  │
+   │  ┌────────┐  │                 │  ┌────────┐  │
+   │  │storage/│  │                 │  │storage/│  │
+   │  │chunks  │  │                 │  │chunks  │  │
+   │  └────────┘  │                 │  └────────┘  │
+   └──────────────┘                 └──────────────┘
+
+Data Flow Summary:
+• Upload:  Client → Leader (file) → DataNode1 + DataNode2 (chunks)
+• Download: Client → Leader (get chunk locations) → DataNodes (fetch chunks directly)
+• List: Client → Leader (get file names)
+
+────────────────────────────────────────────────────────────────
+
+3. Distributed Algorithms Implemented
+
+To achieve fault tolerance, consistency, and decentralized storage, we implemented three distinct distributed mechanisms entirely from scratch in Go.
+
+3.1 Algorithm 1: Leader Election (Simplified RAFT)
+
+• Purpose: To elect a single authoritative Leader node among multiple metadata server replicas, preventing split-brain scenarios.
+• Implementation: All nodes start in a Follower state. Each follower maintains a randomized election timeout (3000ms-6000ms). If a follower does not receive a heartbeat from the current Leader before its timeout expires, it transitions to the Candidate state, increments its term number, votes for itself, and broadcasts RequestVote RPCs to all peers. If the candidate receives votes from a majority (quorum) of nodes, it becomes the Leader and immediately begins sending periodic heartbeats to suppress further elections. If a candidate discovers a node with a higher term, it steps down to Follower.
+
+3.2 Algorithm 2: Log Replication (RAFT Consensus)
+
+• Purpose: To ensure that all metadata server replicas maintain identical records of which files exist and where their chunks are stored.
+• Implementation: When a state change occurs (e.g., a new file is uploaded), the Leader appends a log entry describing the operation (e.g., "UPLOAD:sample.txt:chunks=3") to its local log. The Leader then dispatches AppendEntries RPCs containing the new entry to all follower nodes. Each follower validates and appends the entry to its own log, then sends an acknowledgment. Once the Leader receives acknowledgments from a majority of the cluster, it commits the entry, ensuring the metadata state is applied universally across the ensemble.
+
+3.3 Algorithm 3: Chunk Replication with Fault-Tolerant Retrieval
+
+• Purpose: To ensure data availability even when individual storage nodes fail, and to distribute storage load across the cluster.
+• Implementation: When a file is uploaded, the Leader splits it into fixed-size chunks (1 MB each) and assigns each chunk to 2 DataNodes using round-robin selection (replication factor = 2). For example, chunk_0 is stored on DataNode[0] and DataNode[1], chunk_1 on DataNode[1] and DataNode[2], and so on. During download, the Client receives the list of DataNode addresses for each chunk. It attempts to fetch from the primary node first; if that node is unreachable, the Client automatically retries on the replica node. This provides transparent fault tolerance without manual intervention.
+
+────────────────────────────────────────────────────────────────
+
+4. Multi-Machine Implementation & Tech Stack
+
+This project was implemented entirely in Go (Golang) using gRPC and Protocol Buffers for all inter-node communication, without relying on external third-party libraries for the RAFT consensus logic.
+
+4.1 gRPC Transport Layer
+
+All communication between nodes uses gRPC, Google's high-performance RPC framework built on HTTP/2 and Protocol Buffers. We defined three gRPC services in a single dfs.proto file:
+• MetadataService: Client ↔ Leader communication (upload, download, list)
+• DataNodeService: Leader/Client ↔ DataNode communication (store/get chunks)
+• RaftService: Leader ↔ Leader peer communication (vote, heartbeat, replication)
+
+Protocol Buffers provide strongly-typed, binary-serialized messages that are significantly more compact and faster to parse than JSON or XML.
+
+4.2 Network Setup
+
+The system is explicitly designed for a Multi-Machine Environment. During evaluation, the cluster is deployed across four separate physical laptops connected via the same WiFi network (LAN).
+
+• Laptop 1 (IP: 10.12.77.225): Hosts the Leader / Metadata Server, bound to 0.0.0.0:50051.
+  Runs both MetadataService and RaftService on the same gRPC server.
+
+• Laptop 2 (IP: 10.12.69.102): Hosts DataNode 1, bound to 0.0.0.0:50052.
+  Stores chunk files in a local storage_50052/ directory.
+
+• Laptop 3 (IP: 10.12.89.90): Hosts DataNode 2, bound to 0.0.0.0:50053.
+  Stores chunk files in a local storage_50053/ directory.
+
+• Laptop 4 (IP: 10.12.89.163): Hosts the Client application.
+  Connects to Leader at 10.12.77.225:50051 for metadata operations.
+  Connects directly to DataNodes for chunk retrieval during downloads.
+
+The nodes establish cross-machine gRPC (TCP) connections using configurable --port, --datanodes, --leader, and --peers command-line flags, proving true network decentralization rather than simple single-machine process parallelism.
+
+────────────────────────────────────────────────────────────────
+
+5. Code Quality and Modularity
+
+The codebase is strictly modularized to separate concerns:
+
+• proto/dfs.proto: Defines all gRPC services and Protocol Buffer message types. Single source of truth for the communication contract between all components.
+
+• raft/raft.go: Self-contained RAFT consensus module. Implements leader election (RequestVote), heartbeat mechanism, and log replication (AppendEntries). Exported as a Go package that can be embedded into any server. Supports both single-node auto-election and multi-node consensus.
+
+• leader/leader.go: Metadata server implementing the MetadataService. Handles file chunking (1MB blocks), round-robin chunk assignment with replication factor 2, metadata storage (in-memory map), and integration with the RAFT module for log replication.
+
+• datanode/datanode.go: Lightweight storage server implementing the DataNodeService. Stores chunks as individual files on local disk. Completely stateless regarding global metadata — it simply stores and retrieves bytes.
+
+• client/client.go: CLI client with three commands (upload, download, list). Implements fault-tolerant chunk retrieval with automatic retry on replica DataNodes. Directly communicates with DataNodes during downloads to avoid Leader bottleneck.
+
+Key Design Principles:
+• Separation of concerns: Metadata management, data storage, consensus, and client logic are in independent modules.
+• Configurable deployment: All addresses and ports are configurable via command-line flags.
+• Educational clarity: Every function is well-commented explaining the distributed systems concept it demonstrates.
+
+────────────────────────────────────────────────────────────────
+
+6. Demonstrated Use Cases
+
+We demonstrate the robustness of our architecture through three distinct operational scenarios mapped directly to our algorithms.
+
+6.1 Use Case 1: File Upload with Chunk Replication
+
+• Scenario: A client uploads a file (sample.txt) to the distributed file system.
+• Expected Output: The Leader receives the file, splits it into 1MB chunks, and sends each chunk to 2 DataNodes. The terminal logs clearly display the chunk assignment:
+    Chunk sample.txt_chunk_0 (215 bytes) -> [10.12.69.102:50052, 10.12.89.90:50053]
+    Stored on 10.12.69.102:50052
+    Stored on 10.12.89.90:50053
+    File 'sample.txt' uploaded successfully: 1 chunks, replication factor 2
+  Both DataNode terminals confirm chunk storage on their local disks.
+
+[Insert Screenshot 1 Here: Leader terminal showing chunk assignment to 2 DataNodes, and both DataNode terminals showing "STORED chunk" messages.]
+
+6.2 Use Case 2: File Download with Chunk Reassembly
+
+• Scenario: A client downloads a previously uploaded file.
+• Expected Output: The Client contacts the Leader to get chunk locations, then fetches each chunk directly from DataNodes and reassembles the file. The output shows:
+    File has 1 chunks
+    Chunk 1/1: sample.txt_chunk_0
+      Available on: [10.12.69.102:50052, 10.12.89.90:50053]
+      Retrieved 215 bytes
+    SUCCESS: File saved as 'downloaded_sample.txt' (215 bytes)
+  The downloaded file content matches the original, proving correct chunk reassembly.
+
+[Insert Screenshot 2 Here: Client terminal showing successful download with chunk locations and byte counts.]
+
+6.3 Use Case 3: Node Failure and Fault-Tolerant Recovery
+
+• Scenario: DataNode 1 (10.12.69.102:50052) is killed (simulating hardware crash) and the client attempts to download the file again.
+• Expected Output: The Client detects the DataNode failure and automatically retries on the replica:
+    Chunk 1/1: sample.txt_chunk_0
+      Available on: [10.12.69.102:50052, 10.12.89.90:50053]
+      WARNING: DataNode 10.12.69.102:50052 unavailable
+      Chunk retrieval failed from 10.12.69.102:50052
+      Trying replica 10.12.89.90:50053...
+      Successfully retrieved from replica!
+    SUCCESS: File saved as 'downloaded_sample.txt' (215 bytes)
+  This proves that chunk replication provides transparent fault tolerance — the file is still fully recoverable despite a node failure.
+
+[Insert Screenshot 3 Here: Client terminal showing the failure message, retry on replica, and successful download despite DataNode 1 being offline.]
+
+────────────────────────────────────────────────────────────────
+
+7. Comparison with Apache HDFS
+
+Feature               | Our System           | Real Apache HDFS
+-----------------------|----------------------|-------------------------
+Chunk size             | 1 MB                | 128 MB (default)
+Replication factor     | 2                   | 3 (default)
+Metadata storage       | In-memory (map)     | Disk (fsimage + edit logs)
+Consensus              | Simplified RAFT     | ZooKeeper
+Communication          | gRPC (HTTP/2)       | Hadoop RPC
+Secondary NameNode     | Not implemented     | Yes (checkpoint node)
+Rack awareness         | No                  | Yes (network topology)
+Language               | Go                  | Java
+Authentication         | None                | Kerberos
+Scalability            | Demo scale (4 nodes)| Petabytes (1000s of nodes)
+
+────────────────────────────────────────────────────────────────
+
+8. Conclusion
+
+This case study demonstrates a working implementation of core distributed systems concepts through a simplified HDFS-like file system. The project successfully showcases:
+
+1. Data Partitioning — files split into 1MB chunks distributed across multiple nodes
+2. Replication — each chunk stored on 2 DataNodes for fault tolerance
+3. Consensus — RAFT algorithm for leader election and metadata log replication
+4. Fault Tolerance — automatic retry on replica DataNodes when primary fails
+5. Decentralized Communication — gRPC-based RPC between independent nodes across a real network
+
+The system runs across 4 physical laptops connected via WiFi, proving true distributed operation rather than simulated parallelism on a single machine. All distributed algorithms (RAFT election, heartbeat, log replication, chunk replication, fault-tolerant retrieval) were implemented from scratch in Go without external libraries.
+
+────────────────────────────────────────────────────────────────
