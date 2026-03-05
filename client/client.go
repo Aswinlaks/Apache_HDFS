@@ -32,7 +32,7 @@ import (
 
 func main() {
 	// Command-line flags
-	leaderAddr := flag.String("leader", "172.17.192.1:50051", "Leader server address")
+	leaderAddr := flag.String("leader", "10.12.77.225:50051", "Leader server address")
 	flag.Parse()
 
 	args := flag.Args()
