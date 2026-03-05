@@ -1,0 +1,560 @@
+# ============================================================================
+# DISTRIBUTED FILE SYSTEM — CASE STUDY REVIEW PREPARATION
+# ============================================================================
+# This document prepares you for ANY question your evaluator may ask about
+# your HDFS-like distributed file system built with Go, gRPC, and RAFT.
+# ============================================================================
+
+
+================================================================================
+SECTION 1: PROJECT OVERVIEW & ARCHITECTURE
+================================================================================
+
+Q1: What is this project about?
+A: This is a simplified Distributed File System (DFS) inspired by Apache HDFS.
+   It demonstrates core distributed systems concepts: file chunking, replication,
+   fault tolerance, consensus (RAFT), and RPC-based communication (gRPC).
+   It runs across 4 laptops on the same network.
+
+Q2: What are the main components?
+A: Four components:
+   1. Leader (Metadata Server) — Coordinates everything. Splits files into chunks,
+      assigns chunks to DataNodes, stores metadata (which file is on which node).
+   2. DataNode — Simple storage servers. They store and return file chunks.
+   3. Client — CLI tool for users to upload, download, and list files.
+   4. RAFT Module — Consensus algorithm for leader election and log replication.
+
+Q3: How does this relate to Apache HDFS?
+A: Apache HDFS has a similar architecture:
+   - Our Leader = HDFS NameNode (stores metadata)
+   - Our DataNode = HDFS DataNode (stores actual data blocks)
+   - Our Client = HDFS Client
+   - HDFS uses a different consensus (ZooKeeper), we use RAFT
+   - HDFS has a default replication factor of 3, ours is 2
+
+Q4: What technologies are used and why?
+A: - Go (Golang): Excellent concurrency support (goroutines), simple syntax,
+     built-in networking, compiles to a single binary.
+   - gRPC: High-performance RPC framework using HTTP/2 and Protocol Buffers.
+     Provides strongly-typed service definitions and code generation.
+   - Protocol Buffers (protobuf): Language-neutral serialization format.
+     Defines our messages and services in dfs.proto.
+   - RAFT: Consensus algorithm for distributed agreement. Simpler than
+     Paxos, easier to understand and implement for educational purposes.
+
+Q5: Draw/explain the architecture diagram.
+A:
+   Client (Laptop 4)
+      |
+      | gRPC (MetadataService: upload/download/list)
+      v
+   Leader / Metadata Server (Laptop 1, port 50051)
+      |                    |
+      | gRPC               | gRPC
+      | (StoreChunk/        | (StoreChunk/
+      |  GetChunk)          |  GetChunk)
+      v                    v
+   DataNode 1            DataNode 2
+   (Laptop 2, :50052)    (Laptop 3, :50053)
+
+   RAFT runs inside the Leader for consensus.
+
+
+================================================================================
+SECTION 2: gRPC & PROTOCOL BUFFERS
+================================================================================
+
+Q6: What is gRPC? Why use it instead of REST?
+A: gRPC is a Remote Procedure Call framework by Google.
+   Advantages over REST:
+   - Uses HTTP/2 (multiplexing, binary framing) → faster
+   - Protocol Buffers for serialization → smaller payloads than JSON
+   - Strongly typed — service contracts defined in .proto files
+   - Auto-generates client/server code in any language
+   - Supports streaming (unary, server-stream, client-stream, bidirectional)
+
+Q7: What is a Protocol Buffer (.proto) file?
+A: It's a schema file that defines:
+   - Messages: Data structures (like structs/classes)
+   - Services: RPC methods with input/output types
+   The protoc compiler generates Go code from this file.
+
+Q8: What services are defined in our proto file?
+A: Three services:
+   1. MetadataService (Client ↔ Leader)
+      - UploadFile(FileData) → UploadResponse
+      - DownloadFile(FileRequest) → FileChunks
+      - ListFiles(Empty) → FileList
+
+   2. DataNodeService (Leader/Client ↔ DataNode)
+      - StoreChunk(Chunk) → Ack
+      - GetChunk(ChunkRequest) → Chunk
+
+   3. RaftService (Leader ↔ Leader peers)
+      - RequestVote(VoteRequest) → VoteReply
+      - AppendEntries(AppendRequest) → AppendReply
+
+Q9: How do you generate Go code from the proto file?
+A: Command: protoc --go_out=. --go-grpc_out=. proto/dfs.proto
+   This generates two files:
+   - dfs.pb.go: Message types (structs, serialization)
+   - dfs_grpc.pb.go: Service interfaces and client stubs
+
+Q10: What transport protocol does gRPC use?
+A: gRPC runs over HTTP/2, which itself runs over TCP.
+   So the stack is: Application → gRPC → HTTP/2 → TCP → IP
+
+Q11: What is the difference between Unary and Streaming RPC?
+A: - Unary: Single request → single response (what we use)
+   - Server streaming: Single request → stream of responses
+   - Client streaming: Stream of requests → single response
+   - Bidirectional: Stream both ways
+   We use unary RPCs for simplicity.
+
+
+================================================================================
+SECTION 3: FILE CHUNKING & REPLICATION
+================================================================================
+
+Q12: What is file chunking? Why do we chunk files?
+A: Chunking = splitting a large file into smaller pieces (chunks).
+   Why:
+   - Distributes storage load across multiple nodes
+   - Enables parallel uploads/downloads
+   - Allows replication at chunk level (not whole file)
+   - In real HDFS, chunks are typically 128MB. Ours are 1MB for demo purposes.
+
+Q13: How does chunking work in our system?
+A: 1. Client sends entire file to Leader
+   2. Leader splits into 1MB chunks
+   3. Each chunk gets an ID: "<filename>_chunk_<index>"
+   4. Example: A 2.5MB file → 3 chunks:
+      - sample.txt_chunk_0 (1MB)
+      - sample.txt_chunk_1 (1MB)
+      - sample.txt_chunk_2 (0.5MB)
+
+Q14: What is replication? What is our replication factor?
+A: Replication = storing copies of each chunk on multiple DataNodes.
+   Our replication factor = 2 (each chunk stored on 2 different DataNodes).
+   This provides fault tolerance — if one node fails, data is still available.
+
+Q15: How are chunks assigned to DataNodes?
+A: Round-robin assignment with replication factor 2:
+   - chunk_0 → DataNode[0], DataNode[1]  (e.g., node1, node2)
+   - chunk_1 → DataNode[1], DataNode[2]  (e.g., node2, node3)
+   - chunk_2 → DataNode[2], DataNode[0]  (e.g., node3, node1)
+   This ensures even distribution across all nodes.
+
+Q16: What is the metadata and where is it stored?
+A: Metadata = mapping of filename → chunk locations.
+   Example:
+     "report.pdf" → [
+       {chunk_id: "report.pdf_chunk_0", locations: ["10.12.69.102:50052", "10.12.89.90:50053"]},
+       {chunk_id: "report.pdf_chunk_1", locations: ["10.12.89.90:50053", "10.12.69.102:50052"]}
+     ]
+   Stored in-memory on the Leader (in a Go map).
+   In real HDFS, metadata is persisted to disk (fsimage + edit logs).
+
+
+================================================================================
+SECTION 4: UPLOAD & DOWNLOAD FLOW
+================================================================================
+
+Q17: Explain the upload flow step by step.
+A: 1. Client reads file from disk
+   2. Client sends file content + filename to Leader via gRPC (UploadFile RPC)
+   3. Leader splits file into 1MB chunks
+   4. For each chunk, Leader selects 2 DataNodes (round-robin)
+   5. Leader sends chunk to DataNode1 via gRPC (StoreChunk RPC)
+   6. Leader sends same chunk to DataNode2 via gRPC (StoreChunk RPC)
+   7. DataNodes write chunk to local disk (storage_<port>/<chunk_id>)
+   8. Leader stores metadata in memory
+   9. Leader replicates metadata via RAFT (AppendLogEntry)
+   10. Leader returns success response to Client
+
+Q18: Explain the download flow step by step.
+A: 1. Client sends filename to Leader via gRPC (DownloadFile RPC)
+   2. Leader looks up metadata → returns list of chunk locations
+   3. Client receives chunk locations (chunk_id + DataNode addresses)
+   4. For each chunk, Client connects to DataNode directly (GetChunk RPC)
+   5. If DataNode is unreachable, Client retries on replica DataNode
+   6. Client collects all chunks in order
+   7. Client concatenates chunks → writes reassembled file to disk
+
+Q19: Why does the Client talk directly to DataNodes during download?
+A: To avoid the Leader becoming a bottleneck. If all data flowed through
+   the Leader, it would be overwhelmed with large files.
+   The Leader only handles metadata (small). Actual data transfer is
+   direct between Client and DataNodes. This is how real HDFS works too.
+
+
+================================================================================
+SECTION 5: FAULT TOLERANCE
+================================================================================
+
+Q20: What happens if a DataNode fails during download?
+A: The Client retries on the replica. Flow:
+   1. Client tries to fetch chunk from primary DataNode (e.g., node1)
+   2. Connection fails → Client prints:
+      "Chunk retrieval failed from 10.12.69.102:50052"
+      "Trying replica 10.12.89.90:50053..."
+   3. Client connects to replica DataNode (node2)
+   4. Gets the chunk successfully
+   5. Prints: "Successfully retrieved from replica!"
+
+Q21: What happens if BOTH replicas of a chunk fail?
+A: The download fails with an error:
+   "all replicas failed for chunk <chunk_id>"
+   The file cannot be recovered. In production HDFS, replication factor
+   is typically 3 to reduce this risk further.
+
+Q22: What happens if the Leader fails?
+A: Currently, the entire system becomes unavailable (single point of failure).
+   To fix this, you would run multiple Leader instances with RAFT consensus.
+   RAFT would elect a new leader automatically. Our RAFT module supports
+   this via the --peers flag, but in the basic demo we use a single leader.
+
+Q23: What happens if a DataNode fails during upload?
+A: The upload fails and returns an error to the client:
+   "Failed to store chunk on <node_address>"
+   The Leader does not attempt to find an alternative DataNode (simplified).
+   In real HDFS, the NameNode would reassign the chunk to another node.
+
+Q24: What is the difference between fault tolerance and fault recovery?
+A: - Fault tolerance: System continues working despite failures
+     (our download retry demonstrates this)
+   - Fault recovery: System restores itself after failure
+     (e.g., re-replicating data when a node comes back — not implemented)
+
+
+================================================================================
+SECTION 6: RAFT CONSENSUS ALGORITHM
+================================================================================
+
+Q25: What is consensus in distributed systems?
+A: Consensus = all nodes agree on a single value/decision.
+   In our system, consensus ensures all leader replicas agree on what
+   files exist and where their chunks are stored (metadata consistency).
+
+Q26: What is RAFT?
+A: RAFT is a consensus algorithm designed to be understandable.
+   Published in 2014 by Diego Ongaro and John Ousterhout.
+   It's an alternative to Paxos (which is notoriously hard to understand).
+   RAFT decomposes consensus into 3 sub-problems:
+   1. Leader Election
+   2. Log Replication
+   3. Safety
+
+Q27: What are the three RAFT states?
+A: Every RAFT node is in one of three states:
+   1. Follower — Passive. Waits for heartbeats from Leader.
+   2. Candidate — Active. Requesting votes to become Leader.
+   3. Leader — Active. Sends heartbeats, replicates log entries.
+
+   State transitions:
+   Follower → (election timeout) → Candidate
+   Candidate → (wins election) → Leader
+   Candidate → (loses/higher term) → Follower
+   Leader → (discovers higher term) → Follower
+
+Q28: How does leader election work?
+A: 1. Each Follower has a random election timeout (3-6 seconds in our code)
+   2. If no heartbeat received before timeout → becomes Candidate
+   3. Candidate increments term, votes for itself
+   4. Candidate sends RequestVote RPC to all peers
+   5. Peers vote YES if:
+      - Candidate's term >= their term
+      - They haven't voted for someone else this term
+   6. If Candidate receives majority votes → becomes Leader
+   7. If not → reverts to Follower, waits for next timeout
+
+Q29: Why is the election timeout randomized?
+A: To avoid "split votes" — if all nodes timeout simultaneously,
+   they'd all become Candidates and vote for themselves.
+   Random timeouts ensure one node usually times out first and wins.
+   Our range: 3-6 seconds (real RAFT uses 150-300ms).
+
+Q30: What is a "term" in RAFT?
+A: A term is a logical clock / epoch number.
+   - Each election increments the term
+   - Each node tracks the current term
+   - If a node sees a higher term, it steps down to Follower
+   - Terms help detect stale leaders and outdated messages
+
+Q31: What are heartbeats?
+A: Empty AppendEntries RPCs sent by the Leader to all Followers.
+   Purpose:
+   - Tells Followers "I'm still alive, don't start an election"
+   - Resets the Follower's election timeout
+   In our code: sent every 1 second (real RAFT: ~100ms)
+
+Q32: What is log replication in RAFT?
+A: When the Leader receives a new operation (e.g., file upload):
+   1. Leader appends entry to its local log
+   2. Leader sends AppendEntries RPC to all Followers (with the entry)
+   3. Followers append to their logs and respond
+   4. If majority acknowledge → entry is "committed"
+   5. Committed entries are guaranteed to be durable
+
+Q33: What does our RAFT module actually replicate?
+A: Metadata operations. When a file is uploaded, the Leader replicates:
+   "UPLOAD:sample.txt:chunks=3"
+   This ensures all Leader replicas know about the file.
+   We replicate the operation log, not the actual file data.
+
+Q34: What is the difference between RAFT and Paxos?
+A: Both solve consensus, but:
+   - RAFT has a strong leader (all decisions go through leader)
+   - Paxos is more peer-to-peer
+   - RAFT separates leader election from log replication (clearer)
+   - Paxos is more general but harder to understand/implement
+   - RAFT is used in: etcd, CockroachDB, Consul
+   - Paxos is used in: Google Spanner, Chubby
+
+
+================================================================================
+SECTION 7: NETWORKING & COMMUNICATION
+================================================================================
+
+Q35: How do the nodes communicate?
+A: All communication uses gRPC over TCP (via HTTP/2).
+   - Client → Leader: MetadataService RPCs
+   - Leader → DataNode: DataNodeService RPCs
+   - Client → DataNode: DataNodeService RPCs (during download)
+   - Leader → Leader peer: RaftService RPCs
+
+Q36: What port does each component use?
+A: - Leader: 50051
+   - DataNode 1: 50052
+   - DataNode 2: 50053
+   All ports are configurable via command-line flags.
+
+Q37: How does the system work across laptops?
+A: All laptops must be on the same WiFi network.
+   Each node uses its IP address:port for communication.
+   Example:
+   - Leader on 10.12.77.225:50051
+   - DataNode1 on 10.12.69.102:50052
+   - DataNode2 on 10.12.89.90:50053
+   gRPC uses TCP, so standard network routing handles delivery.
+
+Q38: What does "net.Listen("tcp", ":50051")" mean?
+A: The colon without an IP means "listen on ALL network interfaces."
+   This allows connections from:
+   - localhost (same machine)
+   - Other machines via the WiFi IP (e.g., 10.12.77.225)
+   If we wrote "localhost:50051", only same-machine connections would work.
+
+Q39: What is the role of Protocol Buffers in network communication?
+A: Protocol Buffers serialize data into a compact binary format.
+   Flow: Go struct → protobuf binary → send over network → binary → Go struct
+   Benefits: Smaller than JSON, faster parsing, type-safe, language-neutral.
+
+
+================================================================================
+SECTION 8: GO LANGUAGE CONCEPTS USED
+================================================================================
+
+Q40: Why use Go for this project?
+A: - Goroutines: lightweight threads for concurrent operations
+   - Channels: safe communication between goroutines
+   - Built-in networking (net package)
+   - Simple syntax, easy to read
+   - Compiles to a single binary (easy deployment)
+   - Excellent gRPC support (Google made both Go and gRPC)
+
+Q41: What is a goroutine?
+A: A lightweight thread managed by the Go runtime.
+   Created with the "go" keyword: go functionName()
+   We use goroutines for:
+   - Sending RequestVote RPCs to peers in parallel
+   - Sending heartbeats to peers
+   - Replicating chunks to DataNodes concurrently
+
+Q42: What is sync.Mutex and why do we use it?
+A: Mutex = Mutual Exclusion lock.
+   Prevents multiple goroutines from accessing shared data simultaneously.
+   We use it to protect:
+   - RAFT state (currentTerm, votedFor, log)
+   - Metadata map (filename → chunks)
+   sync.RWMutex allows multiple readers OR one writer.
+
+Q43: What is context.WithTimeout?
+A: Creates a context that automatically cancels after a deadline.
+   We use it for gRPC calls to prevent hanging forever:
+   ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+   If the RPC doesn't respond in 5 seconds, it's cancelled.
+
+Q44: What are command-line flags in Go?
+A: The "flag" package parses command-line arguments:
+   port := flag.Int("port", 50051, "Server port")
+   flag.Parse()
+   Usage: go run leader/leader.go --port=50051 --datanodes=host1:p1,host2:p2
+
+
+================================================================================
+SECTION 9: COMPARISON WITH REAL HDFS
+================================================================================
+
+Q45: How does our system compare to real Apache HDFS?
+
+Feature               | Our System          | Real HDFS
+-----------------------|---------------------|-----------------------
+Chunk size             | 1 MB               | 128 MB (default)
+Replication factor     | 2                  | 3 (default)
+Metadata storage       | In-memory (map)    | Disk (fsimage + edits)
+Consensus             | Simplified RAFT     | ZooKeeper
+Communication         | gRPC               | Custom RPC (Hadoop RPC)
+Secondary NameNode    | Not implemented     | Yes (checkpoint node)
+Rack awareness        | No                 | Yes (network topology)
+Data pipelines        | No                 | Yes (streaming writes)
+Language              | Go                 | Java
+Authentication        | None               | Kerberos
+Scalability           | Demo scale          | Petabytes
+
+Q46: What are the limitations of our system?
+A: 1. Metadata is in-memory only — lost on Leader restart
+   2. Single Leader = single point of failure
+   3. No data integrity checks (checksums)
+   4. No re-replication when a DataNode recovers
+   5. No rack awareness or network topology optimization
+   6. No authentication or authorization
+   7. No streaming — entire file loaded into memory
+
+
+================================================================================
+SECTION 10: DISTRIBUTED SYSTEMS THEORY
+================================================================================
+
+Q47: What is the CAP theorem? Where does our system fall?
+A: CAP theorem: A distributed system can only guarantee 2 of 3:
+   - Consistency: All nodes see the same data
+   - Availability: System responds to every request
+   - Partition tolerance: System works despite network partitions
+
+   Our system prioritizes CP (Consistency + Partition tolerance):
+   - RAFT ensures consistency (majority must agree)
+   - If majority nodes fail, system becomes unavailable
+   - Real HDFS is also CP
+
+Q48: What is the difference between strong and eventual consistency?
+A: - Strong consistency: After a write, all reads return the new value
+     (our RAFT provides this — majority must acknowledge)
+   - Eventual consistency: After a write, reads MAY return old value
+     temporarily, but will eventually converge (e.g., DNS, DynamoDB)
+
+Q49: What are the types of failures in distributed systems?
+A: 1. Crash failure: Node stops responding (we handle this)
+   2. Network partition: Nodes can't communicate with each other
+   3. Byzantine failure: Node behaves maliciously (we DON'T handle this)
+   RAFT handles crash failures and network partitions, but not Byzantine.
+
+Q50: What is the Two Generals Problem?
+A: Two armies need to coordinate an attack but can only communicate
+   via unreliable messengers. It's impossible to achieve 100% certainty.
+   This is why distributed systems use timeouts, retries, and consensus
+   algorithms — perfect agreement is theoretically impossible.
+
+
+================================================================================
+SECTION 11: CODE-SPECIFIC QUESTIONS
+================================================================================
+
+Q51: Walk me through the code structure.
+A: 5 main files:
+   - proto/dfs.proto: Defines all messages and 3 gRPC services
+   - raft/raft.go: RAFT consensus module (election, heartbeat, replication)
+   - leader/leader.go: Metadata server (chunking, replication, metadata)
+   - datanode/datanode.go: Chunk storage server (save/read from disk)
+   - client/client.go: CLI tool (upload, download with retry, list)
+
+Q52: How does the retry logic work in client.go?
+A: The fetchChunkWithRetry() function:
+   1. Takes a chunk ID and list of DataNode addresses
+   2. Tries the first address (primary)
+   3. If it fails, prints "Chunk retrieval failed from node1"
+   4. Tries the next address (replica)
+   5. Prints "Trying replica node2..."
+   6. If replica works, prints "Successfully retrieved from replica!"
+   7. If all fail, returns error
+
+Q53: How does the RAFT election timer work?
+A: time.AfterFunc(randomDuration, startElection)
+   - Creates a timer with random duration (3-6 seconds)
+   - When timer fires, startElection() is called
+   - Every heartbeat received resets this timer
+   - If no heartbeat before timeout → election starts
+
+Q54: What happens in single-node RAFT mode?
+A: When no peers are configured (--peers flag is empty):
+   - Node immediately becomes Leader (no election needed)
+   - Log entries are committed instantly (no replication needed)
+   - This is our default demo mode (1 leader, 2 datanodes)
+
+Q55: How are chunks stored on disk?
+A: DataNode creates a directory: storage_<port>/
+   Each chunk is a file: storage_<port>/<chunk_id>
+   Example: storage_50052/sample.txt_chunk_0
+   The chunk content is raw bytes written with os.WriteFile().
+
+
+================================================================================
+SECTION 12: POTENTIAL EVALUATOR FOLLOW-UP QUESTIONS
+================================================================================
+
+Q56: How would you scale this system?
+A: 1. Add more DataNodes (just start more instances)
+   2. Run multiple Leaders with RAFT for high availability
+   3. Implement sharding of metadata across multiple leaders
+   4. Add a load balancer in front of Leaders
+   5. Increase replication factor for more fault tolerance
+
+Q57: How would you add security?
+A: 1. Use TLS for gRPC connections (encrypted communication)
+   2. Add authentication tokens (JWT or API keys)
+   3. Implement access control lists (ACLs) per file
+   4. Hash chunks with SHA-256 for integrity verification
+
+Q58: How would you persist metadata?
+A: 1. Write metadata to a file (JSON/binary) on disk
+   2. Use a database (SQLite for simple, PostgreSQL for production)
+   3. Use RAFT's log as a write-ahead log (WAL) and replay on restart
+   4. Real HDFS uses fsimage (full snapshot) + edit logs (incremental)
+
+Q59: How would you handle chunk corruption?
+A: 1. Compute checksum (e.g., CRC32 or SHA-256) when storing
+   2. Verify checksum when reading
+   3. If corrupted, fetch from replica
+   4. Re-replicate to maintain replication factor
+   5. Real HDFS does this automatically
+
+Q60: What if you need to support very large files (GBs)?
+A: Current limitation: entire file loaded into memory.
+   Fix: Use gRPC streaming:
+   - Client streams chunks to Leader
+   - Leader streams chunks to DataNodes
+   This avoids loading entire file into memory at once.
+
+
+================================================================================
+SECTION 13: QUICK REFERENCE — KEY TERMS
+================================================================================
+
+Term                  | Definition
+-----------------------|--------------------------------------------------
+Chunk/Block           | A piece of a file (1MB in our system)
+Replication Factor    | Number of copies of each chunk (2 in our system)
+Metadata              | Data about data (file → chunk locations)
+NameNode              | HDFS term for our Leader (stores metadata)
+DataNode              | Stores actual file chunks
+Consensus             | All nodes agreeing on a value/decision
+RAFT                  | Consensus algorithm (Leader election + Log replication)
+Term (RAFT)           | Epoch/era number, incremented on each election
+Heartbeat             | Periodic message from Leader to Followers
+gRPC                  | Google's RPC framework (HTTP/2 + Protocol Buffers)
+Protocol Buffers      | Binary serialization format (.proto files)
+Fault Tolerance       | System continues working despite node failures
+CAP Theorem           | Consistency, Availability, Partition tolerance (pick 2)
+Quorum/Majority       | More than half the nodes (needed for RAFT decisions)
+RPC                   | Remote Procedure Call (calling a function on another machine)
+Serialization         | Converting data to bytes for network transmission
