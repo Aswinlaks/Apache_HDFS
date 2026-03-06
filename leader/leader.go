@@ -218,7 +218,7 @@ func sendChunkToDataNode(addr, chunkID string, data []byte) error {
 func main() {
 	// Command-line flags for configuration
 	port := flag.Int("port", 50051, "Leader server port")
-	datanodeList := flag.String("datanodes", "10.12.69.102:50052,10.12.68.157:50053",
+	datanodeList := flag.String("datanodes", "10.12.71.15:50052,10.12.68.157:50053",
 		"Comma-separated DataNode addresses")
 	nodeID := flag.String("id", "leader1", "Unique node ID for RAFT")
 	peerList := flag.String("peers", "",
